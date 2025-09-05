@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Complete Web CAD with STL Export</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: system-ui, sans-serif; background-color: #f0f0f0; }
+        #container { width: 100vw; height: 100vh; display: block; }
+        .panel {
+            position: absolute; top: 20px; background-color: rgba(255, 255, 255, 0.95);
+            padding: 15px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            border: 1px solid #ccc;
+        }
+        #ui-panel { left: 20px; width: 180px; }
+        #sketch-panel { right: 20px; display: none; }
+        h3, h4 { margin-top: 0; border-bottom: 1px solid #ccc; padding-bottom: 5px; }
+        button { display: block; width: 100%; padding: 10px; margin-bottom: 10px; font-size: 14px;
+            border: 1px solid #aaa; border-radius: 5px; background-color: #e9e9e9; cursor: pointer; }
+        button.active { background-color: #007bff; color: white; }
+        button.export { background-color: #28a745; color: white; }
+        button:hover:not(:disabled) { background-color: #dcdcdc; }
+        button:disabled { cursor: not-allowed; opacity: 0.5; }
+        #info-box {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background-color: rgba(0, 0, 0, 0.7);
+            color: white; padding: 10px 20px; border-radius: 5px; font-size: 16px; display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+
+    <div id="ui-panel" class="panel">
+        <h3>CAD Tools</h3>
+        <button id="btn-start-sketch">1. Start Sketch</button>
+        <button id="btn-extrude" disabled>2. Extrude Sketch</button>
+        <button id="btn-chamfer">3. Apply Chamfer</button>
+        <hr>
+        <button id="btn-download" class="export">Download STL</button>
+        <button id="btn-reset">Reset Model</button>
+    </div>
+
+    <div id="sketch-panel" class="panel">
+        <h4>Sketch Tools</h4>
+        <button id="btn-draw-circle">Draw Circle...</button>
+        <button id="btn-draw-rect">Draw Rectangle...</button>
+        <hr>
+        <button id="btn-finish-sketch">Finish Sketch</button>
+    </div>
+
+    <div id="info-box">Welcome!</div>
+
+    <script type="importmap">
+        { "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { STLExporter } from 'three/addons/exporters/STLExporter.js'; // NEW: For exporting
+        import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'; // NEW: For merging
+
+        let scene, camera, renderer, controls;
+        let mainBlock;
+        let isSketchModeActive = false;
+        let waitingForFaceSelection = false, waitingForChamferSelection = false;
+        let sketchPlane, sketchGroup;
+        let drawingTool = null;
+        let savedCameraState = {};
+        let cadObjects = [];
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        window.addEventListener('DOMContentLoaded', init);
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xaaaaaa);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(5, 5, 5);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('container').appendChild(renderer.domElement);
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+            dirLight.position.set(5, 10, 7.5);
+            scene.add(dirLight);
+            scene.add(new THREE.GridHelper(20, 20));
+            sketchGroup = new THREE.Group();
+            scene.add(sketchGroup);
+            createMainBlock(new THREE.BoxGeometry(4, 1, 4));
+            setupEventListeners();
+            updateInfo("Welcome! Click 'Start Sketch' to begin.");
+            animate();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        function createMainBlock(geometry) {
+            const material = new THREE.MeshStandardMaterial({ color: 0x007bff, metalness: 0.1, roughness: 0.6 });
+            mainBlock = new THREE.Mesh(geometry, material);
+            mainBlock.name = "mainBlock";
+            scene.add(mainBlock);
+            cadObjects = [mainBlock];
+        }
+
+        function enterSketchMode(intersection) { /* ... no changes ... */
+            sketchGroup.clear(); isSketchModeActive = true; controls.enabled = false;
+            savedCameraState = { position: camera.position.clone(), quaternion: camera.quaternion.clone() };
+            sketchPlane = new THREE.Mesh( new THREE.PlaneGeometry(100, 100), new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }) );
+            sketchPlane.position.copy(intersection.point);
+            sketchPlane.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), intersection.face.normal);
+            scene.add(sketchPlane);
+            const normal = intersection.face.normal.clone();
+            camera.position.copy(intersection.point.clone().add(normal.multiplyScalar(8)));
+            camera.lookAt(intersection.point);
+            document.getElementById('sketch-panel').style.display = 'block';
+            updateInfo("Sketch Mode: Select a tool to define dimensions.");
+        }
+
+        function drawShapeOnSketchPlane(point) { /* ... no changes ... */
+            let geom, sketchObject;
+            const sketchMaterial = new THREE.MeshBasicMaterial({ color: 0xffa500, side: THREE.DoubleSide });
+            if (drawingTool.type === 'circle') {
+                geom = new THREE.CircleGeometry(drawingTool.radius, 32);
+                sketchObject = new THREE.Mesh(geom, sketchMaterial);
+                sketchObject.userData = { shapeType: 'circle', radius: drawingTool.radius };
+            } else if (drawingTool.type === 'rect') {
+                geom = new THREE.PlaneGeometry(drawingTool.width, drawingTool.height);
+                sketchObject = new THREE.Mesh(geom, sketchMaterial);
+                sketchObject.userData = { shapeType: 'rect', width: drawingTool.width, height: drawingTool.height };
+            }
+            if (sketchObject) {
+                sketchObject.position.copy(point); sketchObject.quaternion.copy(sketchPlane.quaternion);
+                sketchGroup.add(sketchObject); drawingTool = null;
+                updateInfo("Shape placed. Select another tool or Finish.");
+            }
+        }
+        
+        function finishSketch() { /* ... no changes ... */
+            isSketchModeActive = false; controls.enabled = true; drawingTool = null;
+            if (sketchPlane) scene.remove(sketchPlane);
+            camera.position.copy(savedCameraState.position); camera.quaternion.copy(savedCameraState.quaternion);
+            document.getElementById('sketch-panel').style.display = 'none';
+            if (sketchGroup.children.length > 0) {
+                document.getElementById('btn-extrude').disabled = false;
+                updateInfo("Sketch finished. Ready to extrude.");
+            } else { updateInfo("Sketch cancelled."); }
+        }
+
+        function performExtrusion() { /* ... no changes ... */
+            if (sketchGroup.children.length === 0) return alert("There are no sketch elements to extrude.");
+            const depthStr = prompt("Enter extrusion length:", "2.0"); if (!depthStr) return;
+            const extrusionDepth = parseFloat(depthStr);
+            if (isNaN(extrusionDepth) || extrusionDepth <= 0) return alert("Please enter a valid positive number for the length.");
+            for (const sketch of sketchGroup.children) {
+                let toolGeom; const data = sketch.userData;
+                if (data.shapeType === 'circle') {
+                    toolGeom = new THREE.CylinderGeometry(data.radius, data.radius, extrusionDepth, 32);
+                    toolGeom.rotateX(Math.PI / 2);
+                } else if (data.shapeType === 'rect') {
+                    toolGeom = new THREE.BoxGeometry(data.width, data.height, extrusionDepth);
+                }
+                if (toolGeom) {
+                    const material = new THREE.MeshStandardMaterial({ color: 0x007bff, metalness: 0.1, roughness: 0.6 });
+                    const extrudedMesh = new THREE.Mesh(toolGeom, material);
+                    extrudedMesh.position.copy(sketch.position); extrudedMesh.quaternion.copy(sketch.quaternion);
+                    extrudedMesh.translateZ(extrusionDepth / 2);
+                    extrudedMesh.name = "extrusion";
+                    scene.add(extrudedMesh); cadObjects.push(extrudedMesh);
+                }
+            }
+            sketchGroup.clear(); document.getElementById('btn-extrude').disabled = true;
+            updateInfo("Extrusion complete. You can now sketch on the new shapes.");
+        }
+        
+        function applyChamferToObject(mesh, chamferSize) { /* ... no changes ... */
+            if (!(mesh.geometry instanceof THREE.BoxGeometry)) { alert("Chamfer is currently only supported for rectangular objects."); return; }
+            const params = mesh.geometry.parameters; const w = params.width, h = params.height, d = params.depth;
+            const shape = new THREE.Shape().moveTo(-w/2, -h/2).lineTo(w/2, -h/2).lineTo(w/2, h/2).lineTo(-w/2, h/2).closePath();
+            const extrudeSettings = { steps: 1, depth: d, bevelEnabled: true, bevelThickness: chamferSize, bevelSize: chamferSize, bevelOffset: -chamferSize, bevelSegments: 2 };
+            const newGeom = new THREE.ExtrudeGeometry(shape, extrudeSettings); newGeom.center();
+            const newMesh = new THREE.Mesh(newGeom, mesh.material);
+            newMesh.position.copy(mesh.position); newMesh.quaternion.copy(mesh.quaternion); newMesh.name = mesh.name;
+            scene.remove(mesh); const index = cadObjects.indexOf(mesh);
+            if (index > -1) { cadObjects.splice(index, 1, newMesh); }
+            if (mesh === mainBlock) { mainBlock = newMesh; }
+            scene.add(newMesh); updateInfo(`Chamfer of size ${chamferSize} applied.`);
+        }
+
+        // --- NEW STL EXPORT FUNCTIONS ---
+        function exportToSTL() {
+            const geometries = [];
+            cadObjects.forEach(mesh => {
+                const geom = mesh.geometry.clone();
+                mesh.updateMatrixWorld(); // Ensure world matrix is up to date
+                geom.applyMatrix4(mesh.matrixWorld); // Apply transformations
+                geometries.push(geom);
+            });
+
+            if (geometries.length === 0) {
+                alert("Model is empty, nothing to export.");
+                return;
+            }
+
+            const mergedGeometry = BufferGeometryUtils.mergeGeometries(geometries, false);
+            const tempMesh = new THREE.Mesh(mergedGeometry); // Exporter needs a mesh
+            
+            const exporter = new STLExporter();
+            const result = exporter.parse(tempMesh, { binary: false }); // Export as text STL
+
+            saveStringAsFile(result, 'cad_model.stl');
+            updateInfo("Model exported as cad_model.stl");
+        }
+
+        function saveStringAsFile(text, filename) {
+            const blob = new Blob([text], { type: 'text/plain' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            link.click();
+            URL.revokeObjectURL(link.href); // Free up memory
+        }
+
+        function setupEventListeners() {
+            document.getElementById('btn-start-sketch').addEventListener('click', () => {
+                waitingForFaceSelection = true;
+                document.getElementById('btn-start-sketch').classList.add('active');
+                updateInfo("Select a face on any model to begin your sketch.");
+            });
+            document.getElementById('btn-extrude').addEventListener('click', performExtrusion);
+            document.getElementById('btn-chamfer').addEventListener('click', () => {
+                waitingForChamferSelection = true;
+                document.getElementById('btn-chamfer').classList.add('active');
+                updateInfo("Select a rectangular object to apply chamfer.");
+            });
+            document.getElementById('btn-reset').addEventListener('click', () => location.reload());
+
+            // NEW: Event listener for the download button
+            document.getElementById('btn-download').addEventListener('click', exportToSTL);
+            
+            document.getElementById('btn-draw-circle').addEventListener('click', () => { /* ... no changes ... */
+                const rStr = prompt("Enter circle radius:", "0.5"); if (!rStr) return; const r = parseFloat(rStr);
+                if (isNaN(r) || r <= 0) return alert("Invalid radius.");
+                drawingTool = { type: 'circle', radius: r }; updateInfo(`Radius set to ${r}. Click surface to place.`);
+            });
+            document.getElementById('btn-draw-rect').addEventListener('click', () => { /* ... no changes ... */
+                const wStr = prompt("Enter rectangle width:", "1.0"); if (!wStr) return; const w = parseFloat(wStr);
+                if (isNaN(w) || w <= 0) return alert("Invalid width.");
+                const hStr = prompt("Enter rectangle height:", "0.75"); if (!hStr) return; const h = parseFloat(hStr);
+                if (isNaN(h) || h <= 0) return alert("Invalid height.");
+                drawingTool = { type: 'rect', width: w, height: h }; updateInfo(`Rectangle set to ${w}x${h}. Click surface.`);
+            });
+            document.getElementById('btn-finish-sketch').addEventListener('click', finishSketch);
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+            window.addEventListener('click', onWindowClick);
+        }
+
+        function onWindowClick(event) { /* ... no changes ... */
+            if (event.target.closest('.panel')) return;
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1; mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            if (waitingForFaceSelection) {
+                const intersects = raycaster.intersectObjects(cadObjects, true);
+                if (intersects.length > 0) {
+                    waitingForFaceSelection = false; document.getElementById('btn-start-sketch').classList.remove('active');
+                    enterSketchMode(intersects[0]);
+                }
+            } else if (waitingForChamferSelection) {
+                const intersects = raycaster.intersectObjects(cadObjects, true);
+                if (intersects.length > 0) {
+                    waitingForChamferSelection = false; document.getElementById('btn-chamfer').classList.remove('active');
+                    const cObj = intersects[0].object; const sStr = prompt("Enter chamfer size:", "0.1");
+                    if(sStr) { const s = parseFloat(sStr); if(!isNaN(s) && s > 0) { applyChamferToObject(cObj, s); } else { alert("Invalid chamfer size."); } }
+                }
+            } else if (isSketchModeActive && drawingTool) {
+                const intersects = raycaster.intersectObject(sketchPlane);
+                if (intersects.length > 0) drawShapeOnSketchPlane(intersects[0].point);
+            }
+        }
+
+        function updateInfo(message) { /* ... no changes ... */
+            const infoBox = document.getElementById('info-box');
+            infoBox.style.display = 'block'; infoBox.textContent = message;
+        }
+    </script>
+</body>
+</html>
